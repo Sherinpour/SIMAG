@@ -1,0 +1,11 @@
+# Python 3.7 or higher is required
+python>=3.10
+
+pandas>=1.3.0
+pyodbc>=4.0.0
+hazm>=0.7.0
+negar>=1.0.0
+tqdm>=4.60.0
+rapidfuzz>=2.0.0
+openpyxl>=3.0.0
+
