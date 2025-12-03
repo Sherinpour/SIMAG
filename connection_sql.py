@@ -1,11 +1,16 @@
 import pyodbc
 import pandas as pd
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ---- Connection settings ----
-server = '172.17.19.3'
-database = 'GEMS'
-username = 'vw_user_ai'
-password = '987654321'
+server = os.getenv('DB_SERVER')
+database = os.getenv('DB_NAME')
+username = os.getenv('DB_USERNAME')
+password = os.getenv('DB_PASSWORD')
 
 # ---- Create connection ----
 conn_str = (
