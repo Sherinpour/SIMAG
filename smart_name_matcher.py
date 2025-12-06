@@ -1,9 +1,9 @@
 import pandas as pd
 import re
 import logging
+import os
 from dataclasses import dataclass
 from hazm import Normalizer
-from negar.virastar import PersianEditor
 from rapidfuzz import fuzz, process
 from tqdm import tqdm
 import argparse
@@ -43,9 +43,9 @@ PREFIX_PATTERN = re.compile(r"""
 # ✅ ---------------- CLASS ----------------
 class SmartNameProcessor:
     """
-    A class for processing and matching Persian names from an Excel file.
+    A class for processing and matching Persian names from Excel or CSV files.
     
-    This class loads an Excel file, cleans and normalizes names, extracts common first names,
+    This class loads an Excel or CSV file, cleans and normalizes names, extracts common first names,
     and finds similar names using fuzzy matching with blocking for efficiency.
     """
 
@@ -59,6 +59,7 @@ class SmartNameProcessor:
         self.name_column = None
         self.normalizer = Normalizer()
         self.settings = settings
+        self.input_file_format = None  # Track input file format
 
     # ✅ 1. REGEX PREFIX REMOVAL
     def remove_prefix_fast(self, name):
@@ -76,28 +77,57 @@ class SmartNameProcessor:
     # ✅ 2. SMART PERSIAN EDITOR
     def correct_text_fast(self, name):
         """
-        Correct Persian text using PersianEditor for cleanup.
-        
-        :param name: The name string to correct.
-        :return: Corrected name.
+        Normalize Persian text using hazm Normalizer.
         """
         if not name:
             return name
-        editor = PersianEditor(str(name))
-        return editor.cleanup()
+        return self.normalizer.normalize(str(name))
 
-    # ✅ 3. LOAD EXCEL
+    # ✅ 3. LOAD FILE (EXCEL OR CSV)
     def load_excel(self, file_path):
         """
-        Load the Excel file and check for required columns.
+        Load the Excel or CSV file and check for required columns.
         
+        Automatically detects file format based on extension.
         Checks for required columns FirstName and LastName.
         
-        :param file_path: Path to the Excel file.
+        :param file_path: Path to the Excel or CSV file.
         :return: Loaded DataFrame.
         """
         logging.info(f"Loading file: {file_path}")
-        self.df = pd.read_excel(file_path)
+        
+        # Detect file format from extension
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        if file_ext == '.csv':
+            # Read CSV with UTF-8 encoding (common for Persian text)
+            try:
+                self.df = pd.read_csv(file_path, encoding='utf-8-sig')
+            except UnicodeDecodeError:
+                # Try other encodings if UTF-8 fails
+                try:
+                    self.df = pd.read_csv(file_path, encoding='utf-8')
+                except:
+                    self.df = pd.read_csv(file_path, encoding='latin-1')
+            self.input_file_format = 'csv'
+            logging.info("Detected CSV format")
+        elif file_ext in ['.xlsx', '.xls']:
+            self.df = pd.read_excel(file_path)
+            self.input_file_format = 'excel'
+            logging.info("Detected Excel format")
+        else:
+            # Default to Excel for backward compatibility
+            logging.warning(f"Unknown file extension '{file_ext}', trying Excel format...")
+            try:
+                self.df = pd.read_excel(file_path)
+                self.input_file_format = 'excel'
+            except:
+                # If Excel fails, try CSV
+                try:
+                    self.df = pd.read_csv(file_path, encoding='utf-8-sig')
+                    self.input_file_format = 'csv'
+                except:
+                    raise ValueError(f"Could not read file '{file_path}'. Supported formats: .xlsx, .xls, .csv")
 
         if not {"FirstName", "LastName"}.issubset(self.df.columns):
             raise ValueError(
@@ -127,12 +157,30 @@ class SmartNameProcessor:
     # ✅ 5. SAVE
     def save(self, output_path):
         """
-        Save the processed DataFrame to an Excel file.
+        Save the processed DataFrame to Excel or CSV file.
         
-        :param output_path: Path to save the output Excel file.
+        Automatically detects output format from file extension.
+        If no extension provided, uses the same format as input file.
+        
+        :param output_path: Path to save the output file.
         """
-        self.df.to_excel(output_path, index=False)
-        logging.info(f"Saved to {output_path}")
+        output_ext = os.path.splitext(output_path)[1].lower()
+        
+        # If no extension, use input file format
+        if not output_ext and self.input_file_format:
+            if self.input_file_format == 'csv':
+                output_path = output_path + '.csv'
+                output_ext = '.csv'
+            else:
+                output_path = output_path + '.xlsx'
+                output_ext = '.xlsx'
+        
+        if output_ext == '.csv':
+            self.df.to_csv(output_path, index=False, encoding='utf-8-sig')
+            logging.info(f"Saved to {output_path} (CSV format)")
+        else:
+            self.df.to_excel(output_path, index=False)
+            logging.info(f"Saved to {output_path} (Excel format)")
 
     # ✅ 6. BLOCKING KEY (REMOVES O(n²))
     def blocking_key(self, last_name):
@@ -222,9 +270,10 @@ class SmartNameProcessor:
         """
         Find similar names using blocking and fuzzy matching.
         
-        Saves results to an Excel file.
+        Saves results to an Excel or CSV file if output_path is provided.
         
         :param output_path: Path to save the similarity results (default: 'final_smart_similar_names.xlsx').
+                           If None, results will not be saved to file.
         :return: DataFrame of similar names.
         """
         # ساخت لیست از ایندکس‌ها و نام‌های خانوادگی برای blocking
@@ -332,16 +381,27 @@ class SmartNameProcessor:
         ])
 
         df_result = df_result.sort_values("درصد تشابه", ascending=False)
-        df_result.to_excel(output_path, index=False)
+        
+        # Save to file only if output_path is provided
+        if output_path:
+            # Detect output format from extension
+            output_ext = os.path.splitext(output_path)[1].lower()
+            if output_ext == '.csv':
+                df_result.to_csv(output_path, index=False, encoding='utf-8-sig')
+                logging.info(f"✅ Final result saved to {output_path} (CSV format)")
+            else:
+                df_result.to_excel(output_path, index=False)
+                logging.info(f"✅ Final result saved to {output_path} (Excel format)")
+        else:
+            logging.info(f"✅ Found {len(df_result)} similar name pairs (not saved to file)")
 
-        logging.info(f"✅ Final result saved to {output_path}")
         return df_result
 
 # ✅ ---------------- RUN ----------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Smart Name Processor for Persian names.")
-    parser.add_argument("input_file", type=str, help="Path to the input Excel file.")
-    parser.add_argument("--output_similar", type=str, default="final_smart_similar_names.xlsx", help="Path to save similar names Excel file.")
+    parser.add_argument("input_file", type=str, help="Path to the input Excel or CSV file.")
+    parser.add_argument("--output_similar", type=str, default="final_smart_similar_names.xlsx", help="Path to save similar names file (Excel or CSV).")
     parser.add_argument("--name_threshold", type=float, default=0.80, help="Threshold for name similarity.")
     parser.add_argument("--last_weight", type=float, default=0.5, help="Weight for last name in scoring.")
     parser.add_argument("--first_weight", type=float, default=0.2, help="Weight for first name in scoring.")
