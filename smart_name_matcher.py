@@ -146,11 +146,29 @@ class SmartNameProcessor:
         """
         tqdm.pandas()
 
-        self.df["FirstName"] = self.df["FirstName"].progress_apply(self.remove_prefix_fast)
-        self.df["FirstName"] = self.df["FirstName"].progress_apply(self.correct_text_fast)
+        try:
+            self.df["FirstName"] = self.df["FirstName"].progress_apply(self.remove_prefix_fast)
+        except Exception as e:
+            logging.error(f"❌ [ERROR] Failed to remove prefixes from FirstName: {e}")
+            logging.warning(f"⚠️ [WARNING] Continuing with original FirstName values...")
         
-        self.df["LastName"] = self.df["LastName"].progress_apply(self.remove_prefix_fast)
-        self.df["LastName"] = self.df["LastName"].progress_apply(self.correct_text_fast)
+        try:
+            self.df["FirstName"] = self.df["FirstName"].progress_apply(self.correct_text_fast)
+        except Exception as e:
+            logging.error(f"❌ [ERROR] Failed to correct FirstName text: {e}")
+            logging.warning(f"⚠️ [WARNING] Continuing with uncorrected FirstName values...")
+        
+        try:
+            self.df["LastName"] = self.df["LastName"].progress_apply(self.remove_prefix_fast)
+        except Exception as e:
+            logging.error(f"❌ [ERROR] Failed to remove prefixes from LastName: {e}")
+            logging.warning(f"⚠️ [WARNING] Continuing with original LastName values...")
+        
+        try:
+            self.df["LastName"] = self.df["LastName"].progress_apply(self.correct_text_fast)
+        except Exception as e:
+            logging.error(f"❌ [ERROR] Failed to correct LastName text: {e}")
+            logging.warning(f"⚠️ [WARNING] Continuing with uncorrected LastName values...")
 
         logging.info("Names normalized & corrected.")
 
@@ -252,18 +270,33 @@ class SmartNameProcessor:
         
         :param min_frequency: Minimum frequency to consider a first name as 'stop' (default: 3).
         """
-        first_names = self.df["FirstName"].dropna().astype(str).str.strip()
-        first_names = first_names[first_names != ""]
+        try:
+            if self.df is None or "FirstName" not in self.df.columns:
+                logging.warning(f"⚠️ [WARNING] Cannot extract stop names: DataFrame or FirstName column not available")
+                self.settings.stop_first_names = []
+                return
+            
+            first_names = self.df["FirstName"].dropna().astype(str).str.strip()
+            first_names = first_names[first_names != ""]
 
-        freq = first_names.value_counts()
+            if len(first_names) == 0:
+                logging.warning(f"⚠️ [WARNING] No first names found to extract stop names")
+                self.settings.stop_first_names = []
+                return
 
-        self.settings.stop_first_names = list(
-            freq[freq >= min_frequency].index
-        )
+            freq = first_names.value_counts()
 
-        logging.info(
-            f"✅ Auto stop_first_names extracted: {self.settings.stop_first_names}"
-        )
+            self.settings.stop_first_names = list(
+                freq[freq >= min_frequency].index
+            )
+
+            logging.info(
+                f"✅ Auto stop_first_names extracted: {self.settings.stop_first_names}"
+            )
+        except Exception as e:
+            logging.error(f"❌ [ERROR] Failed to extract stop first names: {e}")
+            logging.warning(f"⚠️ [WARNING] Continuing without stop names filter...")
+            self.settings.stop_first_names = []
 
     # ✅ 8. FAST MATCHING ENGINE
     def find_similar_names(self, output_path="final_smart_similar_names.xlsx"):
@@ -284,38 +317,38 @@ class SmartNameProcessor:
             if pd.notna(first_name) and pd.notna(last_name):
                 records.append((idx, first_name, last_name))
 
-        # ✅ Blocking بر اساس نام خانوادگی
-        groups = {}
-        for idx, first_name, last_name in records:
-            key = self.blocking_key(last_name)
-            if key:
-                groups.setdefault(key, []).append((idx, first_name, last_name))
-
         results = []
-
-        for group in tqdm(groups.values(), desc="Matching"):
-            for i in range(len(group)):
-                idx1, f1, l1 = group[i]
-                
-                # ساخت نام کامل برای matching
+        
+        # ✅ برای مجموعه‌های کوچک (کمتر از 20 رکورد)، همه را با هم مقایسه می‌کنیم
+        # این باعث می‌شود نام‌های مشابه که blocking key متفاوتی دارند هم مقایسه شوند
+        if len(records) < 20:
+            logging.info(f"📊 Small dataset ({len(records)} records), comparing all records (no blocking)")
+            logging.info(f"📊 This ensures similar names with different blocking keys are still compared")
+            # مقایسه همه با همه
+            for i in tqdm(range(len(records)), desc="Matching"):
+                idx1, f1, l1 = records[i]
                 name1_full = f"{f1} {l1}".strip()
-
+                
                 # ساخت لیست نام‌های کامل برای matching
-                group_names = [f"{f} {l}".strip() for _, f, l in group]
-
+                other_records = [(idx, f, l) for idx, f, l in records if idx != idx1]
+                other_names = [f"{f} {l}".strip() for _, f, l in other_records]
+                
+                if not other_names:
+                    continue
+                
                 matches = process.extract(
                     name1_full,
-                    group_names,
+                    other_names,
                     scorer=fuzz.ratio,
-                    limit=5
+                    limit=10
                 )
-
-                for match_name, score, j in matches:
-                    idx2, f2, l2 = group[j]
-
+                
+                for match_name, score, match_idx in matches:
+                    idx2, f2, l2 = other_records[match_idx]
+                    
                     if idx1 >= idx2:
                         continue
-
+                    
                     org1 = str(self.df.loc[idx1].get("OrganizationTitle", ""))
                     org2 = str(self.df.loc[idx2].get("OrganizationTitle", ""))
 
@@ -363,6 +396,119 @@ class SmartNameProcessor:
                             holding2,
                             final_score
                         ])
+        else:
+            # ✅ برای مجموعه‌های بزرگ، از blocking استفاده می‌کنیم
+            # اما با blocking key انعطاف‌پذیرتر (چندین key برای هر رکورد)
+            logging.info(f"📊 Large dataset ({len(records)} records), using flexible blocking")
+            
+            # ساخت blocking groups با کلیدهای متعدد برای هر رکورد
+            groups = {}
+            for idx, first_name, last_name in records:
+                # ایجاد چندین blocking key برای هر نام خانوادگی
+                keys = []
+                if last_name and len(str(last_name).strip()) >= 2:
+                    last_str = str(last_name).strip()
+                    # کلید بر اساس 2 کاراکتر اول
+                    if len(last_str) >= 2:
+                        keys.append(last_str[:2])
+                    # کلید بر اساس 3 کاراکتر اول
+                    if len(last_str) >= 3:
+                        keys.append(last_str[:3])
+                    # کلید بر اساس 2 کاراکتر آخر
+                    if len(last_str) >= 2:
+                        keys.append(last_str[-2:])
+                
+                # اضافه کردن رکورد به همه گروه‌های مربوطه
+                for key in keys:
+                    if key:
+                        groups.setdefault(key, []).append((idx, first_name, last_name))
+            
+            # حذف تکراری‌ها در هر گروه
+            for key in groups:
+                groups[key] = list(set(groups[key]))
+            
+            # مقایسه درون هر گروه
+            for group in tqdm(groups.values(), desc="Matching"):
+                for i in range(len(group)):
+                    idx1, f1, l1 = group[i]
+                    
+                    # ساخت نام کامل برای matching
+                    name1_full = f"{f1} {l1}".strip()
+
+                    # ساخت لیست نام‌های کامل برای matching
+                    group_names = [f"{f} {l}".strip() for _, f, l in group]
+
+                    matches = process.extract(
+                        name1_full,
+                        group_names,
+                        scorer=fuzz.ratio,
+                        limit=5
+                    )
+
+                    for match_name, score, j in matches:
+                        idx2, f2, l2 = group[j]
+
+                        if idx1 >= idx2:
+                            continue
+
+                        org1 = str(self.df.loc[idx1].get("OrganizationTitle", ""))
+                        org2 = str(self.df.loc[idx2].get("OrganizationTitle", ""))
+
+                        bank1 = str(self.df.loc[idx1].get("BankTitle", ""))
+                        bank2 = str(self.df.loc[idx2].get("BankTitle", ""))
+
+                        # استخراج ستون‌های اضافی برای نام اول
+                        post1 = str(self.df.loc[idx1].get("Post", ""))
+                        org_type1 = str(self.df.loc[idx1].get("OrganizationTypeTitle", ""))
+                        company1 = str(self.df.loc[idx1].get("CompanyTitle", ""))
+                        holding1 = str(self.df.loc[idx1].get("HoldingTitle", ""))
+
+                        # استخراج ستون‌های اضافی برای نام دوم
+                        post2 = str(self.df.loc[idx2].get("Post", ""))
+                        org_type2 = str(self.df.loc[idx2].get("OrganizationTypeTitle", ""))
+                        company2 = str(self.df.loc[idx2].get("CompanyTitle", ""))
+                        holding2 = str(self.df.loc[idx2].get("HoldingTitle", ""))
+
+                        final_score = self.smart_score(
+                            f1, l1,
+                            f2, l2,
+                            org1,
+                            org2,
+                            bank1,
+                            bank2
+                        )
+
+                        if final_score >= self.settings.name_threshold:
+                            # ساخت نام کامل برای نمایش
+                            name1_display = f"{f1} {l1}".strip()
+                            name2_display = f"{f2} {l2}".strip()
+                            
+                            results.append([
+                                name1_display,
+                                post1,
+                                org1,
+                                org_type1,
+                                company1,
+                                holding1,
+                                name2_display,
+                                post2,
+                                org2,
+                                org_type2,
+                                company2,
+                                holding2,
+                                final_score
+                            ])
+            
+            # حذف تکراری‌ها (چون ممکن است یک جفت در چندین گروه باشد)
+            seen_pairs = set()
+            unique_results = []
+            for result in results:
+                # استفاده از tuple مرتب شده برای اطمینان از حذف تکراری‌ها در هر دو جهت
+                pair_key = tuple(sorted([result[0], result[6]]))  # (name1, name2) sorted
+                if pair_key not in seen_pairs:
+                    seen_pairs.add(pair_key)
+                    unique_results.append(result)
+            results = unique_results
 
         df_result = pd.DataFrame(results, columns=[
             "نام اول",
