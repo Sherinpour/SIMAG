@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from urllib.parse import quote_plus
-from smart_name_matcher import SmartNameProcessor, Settings
+from smart_name_matcher2 import SmartNameProcessor, Settings
 import logging
 # from datetime import datetime
 
