@@ -34,12 +34,14 @@ class SimilarNamePair(BaseModel):
     org_type1: str = Field(..., description="First organization type")
     company1: str = Field(..., description="First company title")
     holding1: str = Field(..., description="First holding title")
+    mobile1: str = Field(..., description="First mobile number")
     name2: str = Field(..., description="Second name")
     post2: str = Field(..., description="Second post")
     org2: str = Field(..., description="Second organization")
     org_type2: str = Field(..., description="Second organization type")
     company2: str = Field(..., description="Second company title")
     holding2: str = Field(..., description="Second holding title")
+    mobile2: str = Field(..., description="Second mobile number")
     similarity_score: float = Field(..., description="Similarity percentage")
 
 
@@ -53,9 +55,11 @@ class ProcessRequest(BaseModel):
     """Request model for processing names"""
     id: int = Field(..., description="Event ID to filter data")
     name_threshold: Optional[float] = Field(0.80, description="Name similarity threshold")
-    last_weight: Optional[float] = Field(0.5, description="Last name weight")
+    last_weight: Optional[float] = Field(0.45, description="Last name weight")
     first_weight: Optional[float] = Field(0.2, description="First name weight")
-    org_weight: Optional[float] = Field(0.3, description="Organization weight")
+    org_weight: Optional[float] = Field(0.25, description="Organization weight")
+    post_weight: Optional[float] = Field(0.05, description="Post/position weight")
+    mobile_weight: Optional[float] = Field(0.1, description="Mobile number weight")
     min_freq: Optional[int] = Field(3, description="Minimum frequency for stop names")
 
 
@@ -113,7 +117,8 @@ def fetch_data_from_db(event_id: int):
            [OrganizationTitle],
            [OrganizationTypeTitle],
            [CompanyTitle],
-           [HoldingTitle]
+           [HoldingTitle],
+           [MobileNumber]
     FROM [{database}].[dbo].[vw_Guest_AI]
     WHERE [EventId] = :event_id
     """)
@@ -271,7 +276,9 @@ async def process_and_find_similar(request: ProcessRequest):
                 name_threshold=request.name_threshold,
                 last_name_weight=request.last_weight,
                 first_name_weight=request.first_weight,
-                org_weight=request.org_weight
+                org_weight=request.org_weight,
+                post_weight=request.post_weight,
+                mobile_weight=request.mobile_weight
             )
         except Exception as settings_error:
             logger.error(f"❌ [ERROR] Failed to create settings: {settings_error}")
@@ -334,12 +341,14 @@ async def process_and_find_similar(request: ProcessRequest):
                         org_type1=str(row.get("نوع سازمان اول", "")),
                         company1=str(row.get("عنوان شرکت اول", "")),
                         holding1=str(row.get("عنوان هولدینگ اول", "")),
+                        mobile1=str(row.get("شماره تلفن اول", "")),
                         name2=str(row.get("نام دوم", "")),
                         post2=str(row.get("پست دوم", "")),
                         org2=str(row.get("سازمان دوم", "")),
                         org_type2=str(row.get("نوع سازمان دوم", "")),
                         company2=str(row.get("عنوان شرکت دوم", "")),
                         holding2=str(row.get("عنوان هولدینگ دوم", "")),
+                        mobile2=str(row.get("شماره تلفن دوم", "")),
                         similarity_score=float(row.get("درصد تشابه", 0.0))
                     )
                     pairs.append(pair)
