@@ -11,23 +11,18 @@ import time  # Added for execution time logging
 # Settings
 @dataclass
 class Settings:
-    name_threshold: float = 0.80
-    last_name_weight: float = 0.45
-    first_name_weight: float = 0.2
-    org_weight: float = 0.25
-    post_weight: float = 0.05
-    mobile_weight: float = 0.1
+    name_threshold: float = 0.78
+    last_name_weight: float = 0.40
+    first_name_weight: float = 0.10
+    org_weight: float = 0.30
+    post_weight: float = 0.15
+    mobile_weight: float = 0.05
     stop_first_names: list = None
-    stop_penalty: float = 0.8  # Added: Configurable penalty for stop first names
+    stop_penalty: float = 0.75  # Added: Configurable penalty for stop first names
     use_bank_bonus: bool = True  # Added: Option to enable/disable bank bonus
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
-PREFIX_PATTERN = re.compile(r"""
-^(جناب\s*آقای|سرکار\s*خانم|آقای|خانم|دکتر|مهندس|استاد|حاج|حاجی|
-کربلایی|جناب|سرکار|پروفسور|سید|سیده|بانو|میر|ملا|حجت‌الاسلام|آیت‌الله|
-خان|مشهدی)\s* 
-""", re.VERBOSE | re.IGNORECASE)
 
 class SmartNameProcessor:
     def __init__(self, settings: Settings = Settings()):
@@ -35,9 +30,6 @@ class SmartNameProcessor:
         self.normalizer = Normalizer()
         self.settings = settings
         self.input_file_format = None
-
-    def remove_prefix_vectorized(self, series):
-        return series.str.replace(PREFIX_PATTERN, "", regex=True).str.strip()
 
     def correct_text_vectorized(self, series):
         return series.apply(self.normalizer.normalize)  # Still using apply as hazm is not vectorized, but fast enough for 3000 records
@@ -79,10 +71,7 @@ class SmartNameProcessor:
         return self.df
 
     def process_names(self):
-        self.df["FirstName"] = self.remove_prefix_vectorized(self.df["FirstName"].astype(str))
         self.df["FirstName"] = self.correct_text_vectorized(self.df["FirstName"])
-        
-        self.df["LastName"] = self.remove_prefix_vectorized(self.df["LastName"].astype(str))
         self.df["LastName"] = self.correct_text_vectorized(self.df["LastName"])
         
         logging.info("Names processed (vectorized where possible).")
@@ -106,26 +95,36 @@ class SmartNameProcessor:
         if self.settings.stop_first_names and (f1 in self.settings.stop_first_names or f2 in self.settings.stop_first_names):
             first_sim *= self.settings.stop_penalty  # Configurable penalty
         
-        org_sim = fuzz.partial_ratio(org1, org2) / 100 if org1 and org2 else 0
-        post_sim = fuzz.partial_ratio(post1, post2) / 100 if post1 and post2 else 0
+        # Use token_sort_ratio for organization to avoid high scores for short strings
+        # partial_ratio can give high scores for short strings even when they're different
+        org_sim = fuzz.token_sort_ratio(org1, org2) / 100 if org1 and org2 else 0
+        # Only calculate post similarity if organization similarity is >= 70%
+        if org_sim >= 0.7 and post1 and post2:
+            post_sim = fuzz.partial_ratio(post1, post2) / 100
+        else:
+            post_sim = 0
         
         mobile_sim = 0
         if mobile1 and mobile2:
-            mobile1_clean = ''.join(filter(str.isdigit, str(mobile1)))[-11:]  # Normalize to last 11 digits
+            mobile1_clean = ''.join(filter(str.isdigit, str(mobile1)))[-11:]
             mobile2_clean = ''.join(filter(str.isdigit, str(mobile2)))[-11:]
-            if mobile1_clean and mobile2_clean:
-                if mobile1_clean == mobile2_clean:
-                    mobile_sim = 1.0
+            
+            if len(mobile1_clean) >= 10 and len(mobile2_clean) >= 10:
+                similarity = fuzz.ratio(mobile1_clean, mobile2_clean) / 100.0
+                
+                if similarity >= 0.80:
+                    
+                    mobile_sim = (similarity - 0.80) * 0.5
                 else:
-                    mobile_sim = fuzz.ratio(mobile1_clean, mobile2_clean) / 100
+                    mobile_sim = 0 
         
         bank_bonus = 0
         last_weight = self.settings.last_name_weight
         if self.settings.use_bank_bonus and bank1 and bank2:  # Check for use_bank_bonus option
             bank_sim = fuzz.ratio(bank1, bank2) / 100
             if bank_sim >= 0.8:
-                bank_bonus = 0.1
-                last_weight -= 0.1
+                bank_bonus = 0.05
+                last_weight -= 0.05
         
         score = (
             last_weight * last_sim +
@@ -196,6 +195,19 @@ class SmartNameProcessor:
                         company2 = str(self.df.loc[idx2].get("CompanyTitle", ""))
                         holding2 = str(self.df.loc[idx2].get("HoldingTitle", ""))
                         
+                        # Modify organization title for output: if IsHead is False (0), append BankTitle with dash
+                        is_head1 = self.df.loc[idx1].get("IsHead", None)
+                        is_head2 = self.df.loc[idx2].get("IsHead", None)
+                        
+                        # Check if IsHead is False (0) or False boolean
+                        if is_head1 is not None and (is_head1 == 0 or is_head1 == False):
+                            if bank1 and bank1.strip():
+                                org1 = f"{org1} - {bank1}".strip() if org1 else bank1
+                        
+                        if is_head2 is not None and (is_head2 == 0 or is_head2 == False):
+                            if bank2 and bank2.strip():
+                                org2 = f"{org2} - {bank2}".strip() if org2 else bank2
+                        
                         results.append([
                             f"{f1} {l1}".strip(), post1, org1, org_type1, company1, holding1, phone1,
                             f"{f2} {l2}".strip(), post2, org2, org_type2, company2, holding2, phone2,
@@ -227,12 +239,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("input_file", type=str, help="Path to input file (CSV or Excel). Must contain 'FirstName' and 'LastName' columns.")
     parser.add_argument("--output_similar", type=str, default="final_smart_similar_names.xlsx", help="Output path for similar names file (CSV or Excel).")
-    parser.add_argument("--name_threshold", type=float, default=0.80, help="Similarity threshold for considering names similar (0.0-1.0).")
-    parser.add_argument("--last_weight", type=float, default=0.45, help="Weight for last name in scoring.")
-    parser.add_argument("--first_weight", type=float, default=0.2, help="Weight for first name in scoring.")
-    parser.add_argument("--org_weight", type=float, default=0.25, help="Weight for organization in scoring.")
-    parser.add_argument("--post_weight", type=float, default=0.05, help="Weight for post in scoring.")
-    parser.add_argument("--mobile_weight", type=float, default=0.1, help="Weight for mobile number in scoring.")
+    parser.add_argument("--name_threshold", type=float, default=0.78, help="Similarity threshold for considering names similar (0.0-1.0).")
+    parser.add_argument("--last_weight", type=float, default=0.40, help="Weight for last name in scoring.")
+    parser.add_argument("--first_weight", type=float, default=0.10, help="Weight for first name in scoring.")
+    parser.add_argument("--org_weight", type=float, default=0.30, help="Weight for organization in scoring.")
+    parser.add_argument("--post_weight", type=float, default=0.15, help="Weight for post in scoring.")
+    parser.add_argument("--mobile_weight", type=float, default=0.05, help="Weight for mobile number in scoring.")
     parser.add_argument("--min_freq", type=int, default=3, help="Minimum frequency for extracting stop first names.")
     parser.add_argument("--stop_penalty", type=float, default=0.8, help="Penalty multiplier for common first names (0.0-1.0).")
     parser.add_argument("--use_bank_bonus", type=bool, default=True, help="Whether to use bank bonus in scoring (True/False).")

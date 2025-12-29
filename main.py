@@ -54,12 +54,12 @@ class SimilarNamesResponse(BaseModel):
 class ProcessRequest(BaseModel):
     """Request model for processing names"""
     id: int = Field(..., description="Event ID to filter data")
-    name_threshold: Optional[float] = Field(0.80, description="Name similarity threshold")
-    last_weight: Optional[float] = Field(0.45, description="Last name weight")
-    first_weight: Optional[float] = Field(0.2, description="First name weight")
-    org_weight: Optional[float] = Field(0.25, description="Organization weight")
-    post_weight: Optional[float] = Field(0.05, description="Post/position weight")
-    mobile_weight: Optional[float] = Field(0.1, description="Mobile number weight")
+    name_threshold: Optional[float] = Field(0.78, description="Name similarity threshold")
+    last_weight: Optional[float] = Field(0.40, description="Last name weight")
+    first_weight: Optional[float] = Field(0.10, description="First name weight")
+    org_weight: Optional[float] = Field(0.30, description="Organization weight")
+    post_weight: Optional[float] = Field(0.15, description="Post/position weight")
+    mobile_weight: Optional[float] = Field(0.05, description="Mobile number weight")
     min_freq: Optional[int] = Field(3, description="Minimum frequency for stop names")
 
 
@@ -118,7 +118,8 @@ def fetch_data_from_db(event_id: int):
            [OrganizationTypeTitle],
            [CompanyTitle],
            [HoldingTitle],
-           [MobileNumber]
+           [MobileNumber],
+           [IsHead]
     FROM [{database}].[dbo].[vw_Guest_AI]
     WHERE [EventId] = :event_id
     """)
@@ -174,8 +175,7 @@ def fetch_data_from_db(event_id: int):
         #     df.to_excel(output_file, index=False, engine='openpyxl')
         #     logger.info(f"💾 [SAVE] Fetched data saved to file: {output_file}")
         #     logger.info(f"💾 [SAVE] File contains {len(df)} rows and {len(df.columns)} columns")
-        #     logger.info(f"💾 [SAVE] Columns: {list(df.columns)}")
-        #     
+        #     logger.info(f"💾 [SAVE] Columns: {list(df.columns)}")    
         #     # If empty, also save a diagnostic file
         #     if df.empty:
         #         logger.warning(f"⚠️ [WARNING] Saving empty result - this means EventId={event_id} has no matching records")
