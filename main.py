@@ -54,10 +54,10 @@ class SimilarNamesResponse(BaseModel):
 class ProcessRequest(BaseModel):
     """Request model for processing names"""
     id: int = Field(..., description="Event ID to filter data")
-    name_threshold: Optional[float] = Field(0.78, description="Name similarity threshold")
+    name_threshold: Optional[float] = Field(0.75, description="Name similarity threshold")
     last_weight: Optional[float] = Field(0.40, description="Last name weight")
-    first_weight: Optional[float] = Field(0.10, description="First name weight")
-    org_weight: Optional[float] = Field(0.30, description="Organization weight")
+    first_weight: Optional[float] = Field(0.20, description="First name weight")
+    org_weight: Optional[float] = Field(0.20, description="Organization weight")
     post_weight: Optional[float] = Field(0.15, description="Post/position weight")
     mobile_weight: Optional[float] = Field(0.05, description="Mobile number weight")
     min_freq: Optional[int] = Field(3, description="Minimum frequency for stop names")

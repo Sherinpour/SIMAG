@@ -11,10 +11,10 @@ import time  # Added for execution time logging
 # Settings
 @dataclass
 class Settings:
-    name_threshold: float = 0.78
+    name_threshold: float = 0.75
     last_name_weight: float = 0.40
-    first_name_weight: float = 0.10
-    org_weight: float = 0.30
+    first_name_weight: float = 0.20
+    org_weight: float = 0.20
     post_weight: float = 0.15
     mobile_weight: float = 0.05
     stop_first_names: list = None
@@ -184,7 +184,10 @@ class SmartNameProcessor:
                 
                 final_score = self.smart_score(f1, l1, f2, l2, org1, org2, bank1, bank2, post1, post2, phone1, phone2)
                 
-                if final_score >= self.settings.name_threshold:
+                # Check if names are exactly the same (after normalization) - include regardless of threshold
+                exact_name_match = (f1 == f2 and l1 == l2)
+                
+                if exact_name_match or final_score >= self.settings.name_threshold:
                     pair_key = tuple(sorted([f"{f1} {l1}", f"{f2} {l2}"]))
                     if pair_key not in seen_pairs:
                         seen_pairs.add(pair_key)
@@ -239,10 +242,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("input_file", type=str, help="Path to input file (CSV or Excel). Must contain 'FirstName' and 'LastName' columns.")
     parser.add_argument("--output_similar", type=str, default="final_smart_similar_names.xlsx", help="Output path for similar names file (CSV or Excel).")
-    parser.add_argument("--name_threshold", type=float, default=0.78, help="Similarity threshold for considering names similar (0.0-1.0).")
+    parser.add_argument("--name_threshold", type=float, default=0.75, help="Similarity threshold for considering names similar (0.0-1.0).")
     parser.add_argument("--last_weight", type=float, default=0.40, help="Weight for last name in scoring.")
-    parser.add_argument("--first_weight", type=float, default=0.10, help="Weight for first name in scoring.")
-    parser.add_argument("--org_weight", type=float, default=0.30, help="Weight for organization in scoring.")
+    parser.add_argument("--first_weight", type=float, default=0.20, help="Weight for first name in scoring.")
+    parser.add_argument("--org_weight", type=float, default=0.20, help="Weight for organization in scoring.")
     parser.add_argument("--post_weight", type=float, default=0.15, help="Weight for post in scoring.")
     parser.add_argument("--mobile_weight", type=float, default=0.05, help="Weight for mobile number in scoring.")
     parser.add_argument("--min_freq", type=int, default=3, help="Minimum frequency for extracting stop first names.")
