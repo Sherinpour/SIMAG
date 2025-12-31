@@ -20,6 +20,9 @@ class Settings:
     stop_first_names: list = None
     stop_penalty: float = 0.75  # Added: Configurable penalty for stop first names
     use_bank_bonus: bool = True  # Added: Option to enable/disable bank bonus
+    org_threshold_for_post: float = 0.60  # Added: Threshold for organization similarity to calculate post (default 60% instead of 70%)
+    use_shared_lastname_bonus: bool = True  # Added: Bonus when last names share common parts
+    shared_lastname_bonus: float = 0.05  # Added: Bonus value for shared last name parts
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
@@ -71,9 +74,14 @@ class SmartNameProcessor:
         return self.df
 
     def process_names(self):
-        self.df["FirstName"] = self.correct_text_vectorized(self.df["FirstName"])
-        self.df["LastName"] = self.correct_text_vectorized(self.df["LastName"])
+        # self.df["FirstName"] = self.correct_text_vectorized(self.df["FirstName"])
+        # self.df["LastName"] = self.correct_text_vectorized(self.df["LastName"])
         
+        text_cols = ["FirstName", "LastName", "OrganizationTitle", "BankTitle", "Post", "OrganizationTypeTitle", "CompanyTitle", "HoldingTitle"]
+        for col in text_cols:
+            if col in self.df.columns:
+                self.df[col] = self.correct_text_vectorized(self.df[col])
+
         logging.info("Names processed (vectorized where possible).")
 
     def save(self, output_path):
@@ -89,17 +97,27 @@ class SmartNameProcessor:
         logging.info(f"Saved to {output_path}")
 
     def smart_score(self, f1, l1, f2, l2, org1="", org2="", bank1="", bank2="", post1="", post2="", mobile1="", mobile2=""):
-        first_sim = fuzz.token_sort_ratio(f1, f2) / 100  # Improvement: token_sort for word order
-        last_sim = fuzz.token_sort_ratio(l1, l2) / 100
+        # Use max of token_sort_ratio and partial_ratio for names to handle cases where
+        # one name is a subset of another (e.g., "پریسا ساعدی" vs "پریسا ساعدی خسروشاهی")
+        first_token = fuzz.token_sort_ratio(f1, f2) / 100
+        first_partial = fuzz.partial_ratio(f1, f2) / 100
+        first_sim = max(first_token, first_partial)
+        
+        last_token = fuzz.token_sort_ratio(l1, l2) / 100
+        last_partial = fuzz.partial_ratio(l1, l2) / 100
+        last_sim = max(last_token, last_partial)
         
         if self.settings.stop_first_names and (f1 in self.settings.stop_first_names or f2 in self.settings.stop_first_names):
             first_sim *= self.settings.stop_penalty  # Configurable penalty
         
-        # Use token_sort_ratio for organization to avoid high scores for short strings
-        # partial_ratio can give high scores for short strings even when they're different
-        org_sim = fuzz.token_sort_ratio(org1, org2) / 100 if org1 and org2 else 0
-        # Only calculate post similarity if organization similarity is >= 70%
-        if org_sim >= 0.7 and post1 and post2:
+        # Use max of token_sort_ratio and partial_ratio for organization to better handle
+        # cases where one organization name is a subset of another
+        org_token = fuzz.token_sort_ratio(org1, org2) / 100 if org1 and org2 else 0
+        org_partial = fuzz.partial_ratio(org1, org2) / 100 if org1 and org2 else 0
+        org_sim = max(org_token, org_partial)
+        
+        # Only calculate post similarity if organization similarity meets threshold (default 60% instead of 70%)
+        if org_sim >= self.settings.org_threshold_for_post and post1 and post2:
             post_sim = fuzz.partial_ratio(post1, post2) / 100
         else:
             post_sim = 0
@@ -113,7 +131,6 @@ class SmartNameProcessor:
                 similarity = fuzz.ratio(mobile1_clean, mobile2_clean) / 100.0
                 
                 if similarity >= 0.80:
-                    
                     mobile_sim = (similarity - 0.80) * 0.5
                 else:
                     mobile_sim = 0 
@@ -126,17 +143,30 @@ class SmartNameProcessor:
                 bank_bonus = 0.05
                 last_weight -= 0.05
         
+        # Bonus for shared last name parts (e.g., "نجفی" in "نجفی مطیعی")
+        shared_lastname_bonus = 0
+        if self.settings.use_shared_lastname_bonus and l1 and l2:
+            # Check if one last name contains the other (after normalization)
+            l1_words = set(l1.split())
+            l2_words = set(l2.split())
+            # If there are common words or one is subset of another
+            if l1_words.intersection(l2_words) or (l1 in l2 or l2 in l1):
+                # Only give bonus if partial_ratio is high (meaning significant overlap)
+                if last_partial >= 0.8:
+                    shared_lastname_bonus = self.settings.shared_lastname_bonus
+        
         score = (
             last_weight * last_sim +
             self.settings.first_name_weight * first_sim +
             self.settings.org_weight * org_sim +
             self.settings.post_weight * post_sim +
             self.settings.mobile_weight * mobile_sim +
-            bank_bonus
+            bank_bonus +
+            shared_lastname_bonus
         )
         return round(score, 3)
 
-    def extract_stop_first_names(self, min_frequency=3):
+    def extract_stop_first_names(self, min_frequency=5):
         first_names = self.df["FirstName"].astype(str).str.strip()
         first_names = first_names[first_names != ""]
         if len(first_names) == 0:
@@ -157,65 +187,68 @@ class SmartNameProcessor:
         results = []
         seen_pairs = set()
         
-        # For small datasets (<3000), compare all pairs - fast with rapidfuzz
-        logging.info(f"Dataset size: {len(records)}. Comparing all pairs (optimized for small data).")
+        logging.info(f"Dataset size: {len(records)}. Using last_name-based pre-filter with limit=100.")
+        
         for i in range(len(records)):
             idx1, f1, l1 = records[i]
             name1_full = f"{f1} {l1}".strip()
             
             other_records = [(idx, f, l) for idx, f, l in records[i+1:]]  # Only ahead to avoid duplicates
-            other_names = [f"{f} {l}".strip() for _, f, l in other_records]
+            other_lastnames = [l.strip() for _, _, l in other_records]  # فقط last_name
             
-            if not other_names:
+            if not other_lastnames:
                 continue
             
-            matches = process.extract(name1_full, other_names, scorer=fuzz.token_sort_ratio, limit=20)
+            # پیش‌فیلتر: top 100 last_name مشابه با partial_ratio (برای تشخیص subset مثل "نجفی" in "نجفی مطیعی")
+            matches = process.extract(l1, other_lastnames, scorer=fuzz.partial_ratio, limit=100)
             
-            for match_name, score, j in matches:
-                idx2, f2, l2 = other_records[j]
-                org1 = str(self.df.loc[idx1].get("OrganizationTitle", ""))
-                org2 = str(self.df.loc[idx2].get("OrganizationTitle", ""))
-                bank1 = str(self.df.loc[idx1].get("BankTitle", ""))
-                bank2 = str(self.df.loc[idx2].get("BankTitle", ""))
-                post1 = str(self.df.loc[idx1].get("Post", ""))
-                post2 = str(self.df.loc[idx2].get("Post", ""))
-                phone1 = str(self.df.loc[idx1].get("MobileNumber", ""))
-                phone2 = str(self.df.loc[idx2].get("MobileNumber", ""))
-                
-                final_score = self.smart_score(f1, l1, f2, l2, org1, org2, bank1, bank2, post1, post2, phone1, phone2)
-                
-                # Check if names are exactly the same (after normalization) - include regardless of threshold
-                exact_name_match = (f1 == f2 and l1 == l2)
-                
-                if exact_name_match or final_score >= self.settings.name_threshold:
-                    pair_key = tuple(sorted([f"{f1} {l1}", f"{f2} {l2}"]))
-                    if pair_key not in seen_pairs:
-                        seen_pairs.add(pair_key)
-                        org_type1 = str(self.df.loc[idx1].get("OrganizationTypeTitle", ""))
-                        company1 = str(self.df.loc[idx1].get("CompanyTitle", ""))
-                        holding1 = str(self.df.loc[idx1].get("HoldingTitle", ""))
-                        org_type2 = str(self.df.loc[idx2].get("OrganizationTypeTitle", ""))
-                        company2 = str(self.df.loc[idx2].get("CompanyTitle", ""))
-                        holding2 = str(self.df.loc[idx2].get("HoldingTitle", ""))
-                        
-                        # Modify organization title for output: if IsHead is False (0), append BankTitle with dash
-                        is_head1 = self.df.loc[idx1].get("IsHead", None)
-                        is_head2 = self.df.loc[idx2].get("IsHead", None)
-                        
-                        # Check if IsHead is False (0) or False boolean
-                        if is_head1 is not None and (is_head1 == 0 or is_head1 == False):
-                            if bank1 and bank1.strip():
-                                org1 = f"{org1} - {bank1}".strip() if org1 else bank1
-                        
-                        if is_head2 is not None and (is_head2 == 0 or is_head2 == False):
-                            if bank2 and bank2.strip():
-                                org2 = f"{org2} - {bank2}".strip() if org2 else bank2
-                        
-                        results.append([
-                            f"{f1} {l1}".strip(), post1, org1, org_type1, company1, holding1, phone1,
-                            f"{f2} {l2}".strip(), post2, org2, org_type2, company2, holding2, phone2,
-                            final_score * 100  # Convert to percentage for readability
-                        ])
+            for match_last, prelim_score, j in matches:
+                if prelim_score / 100 >= 0.5:  # فقط اگر شباهت اولیه last_name حداقل ۵۰% باشه (برای فیلتر ضعیف)
+                    idx2, f2, l2 = other_records[j]
+                    name2_full = f"{f2} {l2}".strip()
+                    
+                    org1 = str(self.df.loc[idx1].get("OrganizationTitle", ""))
+                    org2 = str(self.df.loc[idx2].get("OrganizationTitle", ""))
+                    bank1 = str(self.df.loc[idx1].get("BankTitle", ""))
+                    bank2 = str(self.df.loc[idx2].get("BankTitle", ""))
+                    post1 = str(self.df.loc[idx1].get("Post", ""))
+                    post2 = str(self.df.loc[idx2].get("Post", ""))
+                    phone1 = str(self.df.loc[idx1].get("MobileNumber", ""))
+                    phone2 = str(self.df.loc[idx2].get("MobileNumber", ""))
+                    
+                    final_score = self.smart_score(f1, l1, f2, l2, org1, org2, bank1, bank2, post1, post2, phone1, phone2)
+                    
+                    # Check if names are exactly the same (after normalization) - include regardless of threshold
+                    exact_name_match = (f1 == f2 and l1 == l2)
+                    
+                    if exact_name_match or final_score >= self.settings.name_threshold:
+                        pair_key = tuple(sorted([name1_full, name2_full]))
+                        if pair_key not in seen_pairs:
+                            seen_pairs.add(pair_key)
+                            org_type1 = str(self.df.loc[idx1].get("OrganizationTypeTitle", ""))
+                            company1 = str(self.df.loc[idx1].get("CompanyTitle", ""))
+                            holding1 = str(self.df.loc[idx1].get("HoldingTitle", ""))
+                            org_type2 = str(self.df.loc[idx2].get("OrganizationTypeTitle", ""))
+                            company2 = str(self.df.loc[idx2].get("CompanyTitle", ""))
+                            holding2 = str(self.df.loc[idx2].get("HoldingTitle", ""))
+                            
+                            # Modify organization title for output: if IsHead is False (0), append BankTitle with dash
+                            is_head1 = self.df.loc[idx1].get("IsHead", None)
+                            is_head2 = self.df.loc[idx2].get("IsHead", None)
+                            
+                            if is_head1 is not None and (is_head1 == 0 or is_head1 == False):
+                                if bank1 and bank1.strip():
+                                    org1 = f"{org1} - {bank1}".strip() if org1 else bank1
+                            
+                            if is_head2 is not None and (is_head2 == 0 or is_head2 == False):
+                                if bank2 and bank2.strip():
+                                    org2 = f"{org2} - {bank2}".strip() if org2 else bank2
+                            
+                            results.append([
+                                name1_full, post1, org1, org_type1, company1, holding1, phone1,
+                                name2_full, post2, org2, org_type2, company2, holding2, phone2,
+                                final_score * 100  # Convert to percentage for readability
+                            ])
         
         df_result = pd.DataFrame(results, columns=[
             "نام اول", "پست اول", "سازمان اول", "نوع سازمان اول", "عنوان شرکت اول", "عنوان هولدینگ اول", "شماره تلفن اول",
@@ -238,7 +271,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Optimized Smart Name Processor for small datasets (up to 3000 records). "
                     "Processes names, extracts common first names, finds similar names based on fuzzy matching, "
-                    "and saves results. Example usage: python script.py input.xlsx --name_threshold 0.85 --min_freq 2 --use_bank_bonus False"
+                    "and saves results. Example usage: python script.py input.xlsx --name_threshold 0.85 -- 2 --use_bank_bonus False"
     )
     parser.add_argument("input_file", type=str, help="Path to input file (CSV or Excel). Must contain 'FirstName' and 'LastName' columns.")
     parser.add_argument("--output_similar", type=str, default="final_smart_similar_names.xlsx", help="Output path for similar names file (CSV or Excel).")
@@ -248,9 +281,12 @@ if __name__ == "__main__":
     parser.add_argument("--org_weight", type=float, default=0.20, help="Weight for organization in scoring.")
     parser.add_argument("--post_weight", type=float, default=0.15, help="Weight for post in scoring.")
     parser.add_argument("--mobile_weight", type=float, default=0.05, help="Weight for mobile number in scoring.")
-    parser.add_argument("--min_freq", type=int, default=3, help="Minimum frequency for extracting stop first names.")
+    parser.add_argument("--min_freq", type=int, default=5, help="Minimum frequency for extracting stop first names.")
     parser.add_argument("--stop_penalty", type=float, default=0.8, help="Penalty multiplier for common first names (0.0-1.0).")
     parser.add_argument("--use_bank_bonus", type=bool, default=True, help="Whether to use bank bonus in scoring (True/False).")
+    parser.add_argument("--org_threshold_for_post", type=float, default=0.60, help="Organization similarity threshold to calculate post similarity (0.0-1.0, default 0.60).")
+    parser.add_argument("--use_shared_lastname_bonus", type=bool, default=True, help="Whether to use bonus for shared last name parts (True/False).")
+    parser.add_argument("--shared_lastname_bonus", type=float, default=0.05, help="Bonus value for shared last name parts (0.0-1.0, default 0.05).")
 
     args = parser.parse_args()
 
@@ -261,8 +297,11 @@ if __name__ == "__main__":
             org_weight=args.org_weight,
             post_weight=args.post_weight,
             mobile_weight=args.mobile_weight,
-            stop_penalty=args.stop_penalty,  # Added
-            use_bank_bonus=args.use_bank_bonus  # Added
+            stop_penalty=args.stop_penalty,
+            use_bank_bonus=args.use_bank_bonus,
+            org_threshold_for_post=args.org_threshold_for_post,
+            use_shared_lastname_bonus=args.use_shared_lastname_bonus,
+            shared_lastname_bonus=args.shared_lastname_bonus
     )
 
     start_time = time.time()  # Start timing

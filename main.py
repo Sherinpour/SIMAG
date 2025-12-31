@@ -60,7 +60,7 @@ class ProcessRequest(BaseModel):
     org_weight: Optional[float] = Field(0.20, description="Organization weight")
     post_weight: Optional[float] = Field(0.15, description="Post/position weight")
     mobile_weight: Optional[float] = Field(0.05, description="Mobile number weight")
-    min_freq: Optional[int] = Field(3, description="Minimum frequency for stop names")
+    min_freq: Optional[int] = Field(5, description="Minimum frequency for stop names")
 
 
 # ✅ ---------------- DATABASE FUNCTIONS ----------------
