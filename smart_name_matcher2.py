@@ -112,13 +112,38 @@ class SmartNameProcessor:
         
         # Use max of token_sort_ratio and partial_ratio for organization to better handle
         # cases where one organization name is a subset of another
+        # BUT: Avoid false positives when one string is a short substring of another
+        # Only use partial_ratio if the shorter string is a significant portion (>=50%) of the longer one
+        # (e.g., "مرکزی" is only 13.5% of "پتروشیمی شازند اراک -دفتر مرکزی تهران" - not significant)
         org_token = fuzz.token_sort_ratio(org1, org2) / 100 if org1 and org2 else 0
         org_partial = fuzz.partial_ratio(org1, org2) / 100 if org1 and org2 else 0
-        org_sim = max(org_token, org_partial)
+        
+        if org1 and org2:
+            len_ratio = min(len(org1), len(org2)) / max(len(org1), len(org2))
+            # If shorter string is less than 50% of longer string AND partial is much higher than token,
+            # it's probably just a small substring match, not real similarity - use token_sort_ratio
+            # This prevents cases like "مرکزی" matching "پتروشیمی شازند اراک -دفتر مرکزی تهران"
+            if len_ratio < 0.5 and org_partial > org_token + 0.3:
+                org_sim = org_token
+            else:
+                # If shorter string is >= 50% of longer, it's a significant portion - use partial_ratio
+                org_sim = max(org_token, org_partial)
+        else:
+            org_sim = max(org_token, org_partial)
         
         # Only calculate post similarity if organization similarity meets threshold (default 60% instead of 70%)
         if org_sim >= self.settings.org_threshold_for_post and post1 and post2:
-            post_sim = fuzz.partial_ratio(post1, post2) / 100
+            # Apply same logic for post: only use partial_ratio if shorter string is >=50% of longer one
+            post_token = fuzz.token_sort_ratio(post1, post2) / 100
+            post_partial = fuzz.partial_ratio(post1, post2) / 100
+            len_ratio_post = min(len(post1), len(post2)) / max(len(post1), len(post2)) if post1 and post2 else 1
+            # If shorter string is less than 50% of longer string AND partial is much higher than token,
+            # it's probably just a small substring match - use token_sort_ratio
+            if len_ratio_post < 0.5 and post_partial > post_token + 0.3:
+                post_sim = post_token
+            else:
+                # If shorter string is >= 50% of longer, it's a significant portion - use partial_ratio
+                post_sim = max(post_token, post_partial)
         else:
             post_sim = 0
         
@@ -241,6 +266,10 @@ class SmartNameProcessor:
                 
                 # Check if names are exactly the same (after normalization) - include regardless of threshold
                 exact_name_match = (f1 == f2 and l1 == l2)
+                
+                # If names are exactly the same, set score to 0.8 (80%) to ensure they appear at the top of the list
+                if exact_name_match:
+                    final_score = 0.8
                 
                 if exact_name_match or final_score >= self.settings.name_threshold:
                     pair_key = tuple(sorted([name1_full, name2_full]))
