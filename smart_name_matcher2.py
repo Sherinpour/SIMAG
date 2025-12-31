@@ -96,7 +96,7 @@ class SmartNameProcessor:
             self.df.to_excel(output_path, index=False)
         logging.info(f"Saved to {output_path}")
 
-    def smart_score(self, f1, l1, f2, l2, org1="", org2="", bank1="", bank2="", post1="", post2="", mobile1="", mobile2=""):
+    def smart_score(self, f1, l1, f2, l2, org1="", org2="", bank1="", bank2="", post1="", post2="", mobile1="", mobile2="", stop_first_names_set=None):
         # Use max of token_sort_ratio and partial_ratio for names to handle cases where
         # one name is a subset of another (e.g., "پریسا ساعدی" vs "پریسا ساعدی خسروشاهی")
         first_token = fuzz.token_sort_ratio(f1, f2) / 100
@@ -107,7 +107,7 @@ class SmartNameProcessor:
         last_partial = fuzz.partial_ratio(l1, l2) / 100
         last_sim = max(last_token, last_partial)
         
-        if self.settings.stop_first_names and (f1 in self.settings.stop_first_names or f2 in self.settings.stop_first_names):
+        if stop_first_names_set and (f1 in stop_first_names_set or f2 in stop_first_names_set):
             first_sim *= self.settings.stop_penalty  # Configurable penalty
         
         # Use max of token_sort_ratio and partial_ratio for organization to better handle
@@ -177,78 +177,93 @@ class SmartNameProcessor:
         logging.info(f"Extracted stop first names: {self.settings.stop_first_names}")
 
     def find_similar_names(self, output_path="final_smart_similar_names.xlsx"):
+        # Pre-extract all data once to avoid repeated df.loc calls
         records = []
         for idx, row in self.df.iterrows():
             first_name = str(row["FirstName"]).strip()
             last_name = str(row["LastName"]).strip()
             if first_name or last_name:  # Keep even if one is empty
-                records.append((idx, first_name, last_name))
+                # Pre-extract all columns we'll need
+                org = str(row.get("OrganizationTitle", ""))
+                bank = str(row.get("BankTitle", ""))
+                post = str(row.get("Post", ""))
+                phone = str(row.get("MobileNumber", ""))
+                org_type = str(row.get("OrganizationTypeTitle", ""))
+                company = str(row.get("CompanyTitle", ""))
+                holding = str(row.get("HoldingTitle", ""))
+                is_head = row.get("IsHead", None)
+                
+                records.append((idx, first_name, last_name, org, bank, post, phone, 
+                              org_type, company, holding, is_head))
+        
+        # Convert stop_first_names to set for O(1) lookup
+        stop_first_names_set = set(self.settings.stop_first_names) if self.settings.stop_first_names else set()
         
         results = []
         seen_pairs = set()
         
-        logging.info(f"Dataset size: {len(records)}. Using last_name-based pre-filter with limit=100.")
+        logging.info(f"Dataset size: {len(records)}. Using optimized last_name-based pre-filter.")
         
         for i in range(len(records)):
-            idx1, f1, l1 = records[i]
+            idx1, f1, l1, org1, bank1, post1, phone1, org_type1, company1, holding1, is_head1 = records[i]
             name1_full = f"{f1} {l1}".strip()
             
-            other_records = [(idx, f, l) for idx, f, l in records[i+1:]]  # Only ahead to avoid duplicates
-            other_lastnames = [l.strip() for _, _, l in other_records]  # فقط last_name
+            # Only process records ahead to avoid duplicates
+            other_records = records[i+1:]
             
-            if not other_lastnames:
+            if not other_records:
                 continue
             
-            # پیش‌فیلتر: top 100 last_name مشابه با partial_ratio (برای تشخیص subset مثل "نجفی" in "نجفی مطیعی")
-            matches = process.extract(l1, other_lastnames, scorer=fuzz.partial_ratio, limit=100)
+            # Optimized pre-filter: use faster partial_ratio directly instead of process.extract
+            # This avoids the overhead of process.extract for each record
+            candidate_indices = []
+            for j, (idx2, f2, l2, _, _, _, _, _, _, _, _) in enumerate(other_records):
+                # Quick last name similarity check (faster than process.extract)
+                last_sim_score = fuzz.partial_ratio(l1, l2)
+                if last_sim_score >= 50:  # Only if last name similarity >= 50%
+                    candidate_indices.append((j, idx2, f2, l2, last_sim_score))
             
-            for match_last, prelim_score, j in matches:
-                if prelim_score / 100 >= 0.5:  # فقط اگر شباهت اولیه last_name حداقل ۵۰% باشه (برای فیلتر ضعیف)
-                    idx2, f2, l2 = other_records[j]
-                    name2_full = f"{f2} {l2}".strip()
-                    
-                    org1 = str(self.df.loc[idx1].get("OrganizationTitle", ""))
-                    org2 = str(self.df.loc[idx2].get("OrganizationTitle", ""))
-                    bank1 = str(self.df.loc[idx1].get("BankTitle", ""))
-                    bank2 = str(self.df.loc[idx2].get("BankTitle", ""))
-                    post1 = str(self.df.loc[idx1].get("Post", ""))
-                    post2 = str(self.df.loc[idx2].get("Post", ""))
-                    phone1 = str(self.df.loc[idx1].get("MobileNumber", ""))
-                    phone2 = str(self.df.loc[idx2].get("MobileNumber", ""))
-                    
-                    final_score = self.smart_score(f1, l1, f2, l2, org1, org2, bank1, bank2, post1, post2, phone1, phone2)
-                    
-                    # Check if names are exactly the same (after normalization) - include regardless of threshold
-                    exact_name_match = (f1 == f2 and l1 == l2)
-                    
-                    if exact_name_match or final_score >= self.settings.name_threshold:
-                        pair_key = tuple(sorted([name1_full, name2_full]))
-                        if pair_key not in seen_pairs:
-                            seen_pairs.add(pair_key)
-                            org_type1 = str(self.df.loc[idx1].get("OrganizationTypeTitle", ""))
-                            company1 = str(self.df.loc[idx1].get("CompanyTitle", ""))
-                            holding1 = str(self.df.loc[idx1].get("HoldingTitle", ""))
-                            org_type2 = str(self.df.loc[idx2].get("OrganizationTypeTitle", ""))
-                            company2 = str(self.df.loc[idx2].get("CompanyTitle", ""))
-                            holding2 = str(self.df.loc[idx2].get("HoldingTitle", ""))
-                            
-                            # Modify organization title for output: if IsHead is False (0), append BankTitle with dash
-                            is_head1 = self.df.loc[idx1].get("IsHead", None)
-                            is_head2 = self.df.loc[idx2].get("IsHead", None)
-                            
-                            if is_head1 is not None and (is_head1 == 0 or is_head1 == False):
-                                if bank1 and bank1.strip():
-                                    org1 = f"{org1} - {bank1}".strip() if org1 else bank1
-                            
-                            if is_head2 is not None and (is_head2 == 0 or is_head2 == False):
-                                if bank2 and bank2.strip():
-                                    org2 = f"{org2} - {bank2}".strip() if org2 else bank2
-                            
-                            results.append([
-                                name1_full, post1, org1, org_type1, company1, holding1, phone1,
-                                name2_full, post2, org2, org_type2, company2, holding2, phone2,
-                                final_score * 100  # Convert to percentage for readability
-                            ])
+            # Limit to top candidates by last name similarity to avoid too many smart_score calls
+            if len(candidate_indices) > 100:
+                # Sort by last name similarity (already computed) and take top 100
+                candidate_indices.sort(key=lambda x: x[4], reverse=True)  # x[4] is last_sim_score
+                candidate_indices = candidate_indices[:100]
+            
+            # Remove the similarity score from tuples before processing
+            candidate_indices = [(j, idx2, f2, l2) for j, idx2, f2, l2, _ in candidate_indices]
+            
+            for j, idx2, f2, l2 in candidate_indices:
+                # Get pre-extracted data for record 2
+                _, _, _, org2, bank2, post2, phone2, org_type2, company2, holding2, is_head2 = other_records[j]
+                name2_full = f"{f2} {l2}".strip()
+                
+                final_score = self.smart_score(f1, l1, f2, l2, org1, org2, bank1, bank2, post1, post2, phone1, phone2, stop_first_names_set)
+                
+                # Check if names are exactly the same (after normalization) - include regardless of threshold
+                exact_name_match = (f1 == f2 and l1 == l2)
+                
+                if exact_name_match or final_score >= self.settings.name_threshold:
+                    pair_key = tuple(sorted([name1_full, name2_full]))
+                    if pair_key not in seen_pairs:
+                        seen_pairs.add(pair_key)
+                        
+                        # Modify organization title for output: if IsHead is False (0), append BankTitle with dash
+                        org1_output = org1
+                        org2_output = org2
+                        
+                        if is_head1 is not None and (is_head1 == 0 or is_head1 == False):
+                            if bank1 and bank1.strip():
+                                org1_output = f"{org1} - {bank1}".strip() if org1 else bank1
+                        
+                        if is_head2 is not None and (is_head2 == 0 or is_head2 == False):
+                            if bank2 and bank2.strip():
+                                org2_output = f"{org2} - {bank2}".strip() if org2 else bank2
+                        
+                        results.append([
+                            name1_full, post1, org1_output, org_type1, company1, holding1, phone1,
+                            name2_full, post2, org2_output, org_type2, company2, holding2, phone2,
+                            final_score * 100  # Convert to percentage for readability
+                        ])
         
         df_result = pd.DataFrame(results, columns=[
             "نام اول", "پست اول", "سازمان اول", "نوع سازمان اول", "عنوان شرکت اول", "عنوان هولدینگ اول", "شماره تلفن اول",
